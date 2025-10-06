@@ -55,23 +55,21 @@ MEW (Marked Edge Walk) is an MCMC algorithm designed for sampling graph partitio
 To run MEW on New Hampshire data:
 ```julia
 include("main_NH.jl")
-# Run your functions here
 ```
 
 To run MEW on Texas data:
 ```julia
 include("main_TX.jl")
-# Run your functions here
 ```
 
 ### Running Multiple Chains
 
-To run batched chains on New Hampshire:
+To run multiple chains on New Hampshire:
 ```julia
 include("batched_wrapper_NH.jl")
 ```
 
-To run batched chains on Texas:
+To run multiple chains on Texas:
 ```julia
 include("batched_wrapper_TX.jl")
 ```
