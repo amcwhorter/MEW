@@ -1,4 +1,4 @@
-using Graphs, GraphPlot, StatsBase, Combinatorics, LinearAlgebra, SparseArrays
+using Graphs, GraphPlot, StatsBase, Combinatorics, LinearAlgebra, SparseArrays, SpecialFunctions
 #contains helpful functions - log metropolis hastings version
 
 function simple_edge(edge::Graphs.SimpleGraphs.SimpleEdge)
@@ -81,6 +81,19 @@ function within_percent_of_ideal(vals, ideal, epsilon)
     return maximum(epsilons) < epsilon
 end
 
+function balance(vals, ideal)
+    ideals = ideal * ones(length(vals))
+    epsilons = abs.((vals-ideals)/ideal)
+    return maximum(epsilons)
+end
+
+function single_within_percent_of_ideal(vals, ideal, epsilon)
+    ideals = ideal * ones(length(vals))
+    epsilons = abs.((vals - ideals)/ideal)
+    return minimum(epsilons) < epsilon
+end
+
+
 function find_balanced_edge_cut(tree, df)
     for edge in edges(tree)
         part_dict = partition(tree, [edge])
@@ -89,7 +102,7 @@ function find_balanced_edge_cut(tree, df)
 
         ideal = sum(df[:,"TOTPOP"])/2
 
-        if within_percent_of_ideal(totals, ideal, 0.01)
+        if within_percent_of_ideal(totals, ideal, 0.1)
             return edge
         end
     end
@@ -100,23 +113,38 @@ function find_balanced_edge_cut(tree, df)
 
 end
 
+function find_all_balanced_edge_cuts(tree, df)
+    returns = []
+    for edge in edges(tree)
+        part_dict = partition(tree, [edge])
+        totals = tally(df, "TOTPOP", part_dict)
+        ideal = sum(df[:,"TOTPOP"])/2
+        if within_percent_of_ideal(totals, ideal, 0.1)
+            push!(returns, edge)
+        end
+    end
+    return returns
+end
+
 function cycle_basis_step(g, tree, marked_edges)
     edges_g = Set(edges(g))
     edges_tree = Set(edges(tree))
     difference_set = setdiff(edges_g, edges_tree)
 
     edge_plus = rand(difference_set)
-    add_edge!(tree, edge_plus)
 
-    cycle = Graphs.cycle_basis(tree)[1]
+    tree_copy = deepcopy(tree)
+    add_edge!(tree_copy, edge_plus)
+
+    cycle = Graphs.cycle_basis(tree_copy)[1]
     cycle_edges = simple_edge.(cycle, circshift(cycle, -1))
 
     possible_cuts = setdiff(cycle_edges, marked_edges)
     edge_minus = rand(possible_cuts)
 
-    rem_edge!(tree, edge_minus)
+    rem_edge!(tree_copy, edge_minus)
 
-    return cycle_edges, edge_plus
+    return cycle_edges, edge_plus, tree_copy
 end
 
 function marked_edge_step(tree, marked_edges)
@@ -124,12 +152,66 @@ function marked_edge_step(tree, marked_edges)
     v1, v2 = src(old_edge), dst(old_edge)
     chosen_v = rand((v1, v2))
     new_edge = simple_edge(chosen_v, rand(Graphs.neighbors(tree, chosen_v)))
-    setdiff!(marked_edges, [old_edge])
-    push!(marked_edges, new_edge)
-    return old_edge, new_edge
+
+    marked_copy = deepcopy(marked_edges)
+    setdiff!(marked_copy, [old_edge])
+    push!(marked_copy, new_edge)
+    return old_edge, new_edge, marked_copy
 end
 
+function proposal(g, df, tree, marked_edges, epsilon, k)
+    reject = 0
+    tree_old = deepcopy(tree)
+    marked_edges_old = deepcopy(marked_edges)
+    returns = []
 
+    while true
+        cycle_edges, edge_plus, tree_new = cycle_basis_step(g, tree, marked_edges)
+        old_edge, new_edge, marked_edges_new = marked_edge_step(tree, marked_edges)
+
+        partition_dict = partition(tree_new, marked_edges_new)
+        pops = tally(df, "TOTPOP", partition_dict)
+        ideal = sum(pops)/k
+
+        
+        if within_percent_of_ideal(pops, ideal, epsilon)
+            push!(returns, [cycle_edges, edge_plus, tree_new, old_edge, new_edge, marked_edges_new, reject])
+            break
+        else
+            reject +=1 
+            tree = deepcopy(tree_old)
+            marked_edges = deepcopy(marked_edges_old)
+        end
+    end
+    return returns[1]
+end
+
+function flip_proposal(df, part, bounds)
+    reject = 0
+    part_old = deepcopy(part)
+    bounds_old = deepcopy(bounds)
+    returns = []
+
+    while true
+        chosen = rand(bounds_old)
+        affil = part[chosen]
+        if affil == 1
+            part[chosen] = 2
+        else
+            part[chosen] = 1
+        end
+
+        pops = tally(df, "TOTPOP", part)
+        ideal = sum(pops) / 2
+        if within_percent_of_ideal(pops, ideal, 0.1)
+            push!(returns, part)
+            break
+        end
+        reject += 1
+        part = deepcopy(part_old)
+    end
+    return returns[1]
+end
 
 function transition_probability(cycle_edges, edge_plus, marked_edge_old, marked_edge_new, marked_edges_old, marked_edges_new, tree_old, tree_new)
     if marked_edge_new == edge_plus
@@ -166,38 +248,119 @@ function transition_probability(cycle_edges, edge_plus, marked_edge_old, marked_
     return pt * pm
 end
 
-function remove_zero_rows_and_cols(lapmat)
-    # Identify zero rows where the number of non-zero elements is zero
-    zero_rows = findall(row -> count(!iszero, lapmat[row, :]) == 0, 1:size(lapmat, 1))
-
-    # Determine indices for non-zero rows and columns
-    non_zero_indices = setdiff(1:size(lapmat, 1), zero_rows)
-
-    # Subset the matrix to exclude zero rows and corresponding columns
-    cleaned_lapmat = lapmat[non_zero_indices, non_zero_indices]
-
-    return cleaned_lapmat
-end
-
 
 function log_τ(edgelist)
 
-    g = SimpleGraphFromIterator(edgelist)
+    unique_nodes = Set{Int}()
+    for edge in edgelist
+        u, v = src(edge), dst(edge)
+        push!(unique_nodes, u, v)
+    end
 
-    L = laplacian_matrix(g)
+    node_map = Dict(node => i for (i, node) in enumerate(unique_nodes))
+    num_nodes = length(unique_nodes)
 
-    L = Matrix(remove_zero_rows_and_cols(L))
+    A = zeros(Int, num_nodes, num_nodes)
     
+    for edge in edgelist
+        u, v = src(edge), dst(edge)
+        i, j = node_map[u], node_map[v]
+
+        A[i, j] += 1
+        A[j, i] += 1  
+    end
+
+    D = Diagonal(vec(sum(A, dims = 2)))
+    L = D - A
+
     Λ = cholesky(L[2:end,2:end])
     U = Λ.L
-    c = 2 * sum(log.([U[i, i] for i in 1:size(U)[1]]))
+    c = 2 * sum(log.([U[i, i] for i in 1:(length(unique_nodes) - 1)]))
 
     return c
 end
 
+function log_τ_sparse(ptition, g)
+    count = 0
+    es = []
+    for e in edges(g)
+        if ptition[src(e)] == ptition[dst(e)]
+            push!(es, e)
+        elseif count == 0
+            push!(es, e)
+            count = 1
+        end
+    end
+    return log_τ_sparse(es)
+end
+
+function log_τ_sparse(edgelist)
+    unique_nodes = Set{Int}()
+    for edge in edgelist
+        u, v = src(edge), dst(edge)
+        push!(unique_nodes, u, v)
+    end
+
+    node_map = Dict(node => i for (i, node) in enumerate(unique_nodes))
+    num_nodes = length(unique_nodes)
+
+    rows = Int[]
+    cols = Int[]
+    vals = Int[]
+
+    for e in edgelist
+        u, v = src(e), dst(e)
+        i, j = node_map[u], node_map[v]
+
+        push!(rows, i); push!(cols, j); push!(vals, 1)
+        push!(rows, j); push!(cols, i); push!(vals, 1)
+    end
+
+    A = sparse(rows, cols, vals, num_nodes, num_nodes)
+
+    degs = vec(sum(A, dims=2))
+    L = spdiagm(0 => degs) - A
+    inds = 2:num_nodes
+    Lr = L[inds, inds]
+
+    Λ = cholesky(Lr)
+
+    c = logdet(Λ)
+    return c
+end
+
+
+
+# function nodes_to_edgelist(g, part)
+#     connected_edges = [simple_edge(u, v) for (u, v) in combinations(part, 2)]
+#     part_edges = intersect(connected_edges, edges(g))
+#     return part_edges
+# end
+
 function nodes_to_edgelist(g, part)
-    connected_edges = [simple_edge(u, v) for (u, v) in combinations(part, 2)]
-    part_edges = intersect(connected_edges, edges(g))
+    part_set = Set(part)
+    [e for e in edges(g) if (src(e) in part_set && dst(e) in part_set)]
+end
+
+
+function all_parts_edgelists(g, parts)
+
+    node_to_part = Dict()
+    for (i, part) in enumerate(parts)
+        for v in part
+            node_to_part[v] = i
+        end
+    end
+    part_edges = [Graphs.SimpleGraphs.SimpleEdge{Int64}[] for _ in 1:length(parts)]
+    for e in edges(g)
+        u, v = src(e), dst(e)
+        if haskey(node_to_part, u) && haskey(node_to_part, v)
+            pu, pv = node_to_part[u], node_to_part[v]
+            if pu == pv
+                push!(part_edges[pu], e)
+            end
+        end
+    end
     return part_edges
 end
 
@@ -212,6 +375,18 @@ function cut_edges(ptition, g)
     end
     return cuts
 end
+
+function boundary_nodes(cuts)
+    returns = Set{Int}()
+    for e in cuts
+        u, v = src(e), dst(e)
+        push!(returns, u)
+        push!(returns, v)
+    end
+    return collect(returns)
+end
+
+
 
 # function cut_edges(g, tree, marked_edges)
 
@@ -231,7 +406,18 @@ end
 #     return length(cuts)
 # end
 
-function partition(parts::Vector{Vector{Int}})
+function partition(parts::Vector{Any})
+    partition_dict = Dict{Int, Int}()
+    for (i, part) in enumerate(parts)
+        for node in part
+            partition_dict[node] = i
+        end
+    end
+    return partition_dict
+end 
+
+
+function partition(parts::Vector{Vector{Int64}})
     partition_dict = Dict{Int, Int}()
     for (i, part) in enumerate(parts)
         for node in part
@@ -272,88 +458,129 @@ function borders_dict(cut_edges, p_dict)
     return borders_dict
 end
 
+function get_neighboring_part_pairs(parts, g)
+    district_neighbors = Dict{Tuple{Int, Int}, Int}()
+    for e in edges(g)
+        u, v = src(e), dst(e)
+        pu, pv = parts[u], parts[v]
+        if pu != pv
+            key = pu < pv ? (pu, pv) : (pv, pu)
+            district_neighbors[key] = get(district_neighbors, key, 0) + 1
+        end
+    end
+    return district_neighbors
+end
+
+
 
 function calculate_τs(g, tree_old, tree_new, marked_edges_old, marked_edges_new)
+
+    tree_new_c = deepcopy(tree_new)
+    tree_old_c = deepcopy(tree_old)
+
     for m in marked_edges_old
-        rem_edge!(tree_old, m)
+        rem_edge!(tree_old_c, m)
     end
 
     for m in marked_edges_new
-        rem_edge!(tree_new, m)
+        rem_edge!(tree_new_c, m)
     end
 
 
     #calculate τ relating to border lengths
-    old_parts = connected_components(tree_old)
-    new_parts = connected_components(tree_new)
+    old_parts = connected_components(tree_old_c)
+    new_parts = connected_components(tree_new_c)
 
     p_dict_old = partition(old_parts)
     p_dict_new = partition(new_parts)
 
-    cut_edges_old = cut_edges(p_dict_old, g)
-    cut_edges_new = cut_edges(p_dict_new, g)
+    # cut_dict_old = get_neighboring_part_pairs(p_dict_old, g)
+    # cut_dict_new = get_neighboring_part_pairs(p_dict_new, g)
 
-    borders_dict_old = borders_dict(cut_edges_old, p_dict_old)
-    borders_dict_new = borders_dict(cut_edges_new, p_dict_new)
+    # τ_border_lengths = sum(log.(values(cut_dict_old))) - sum(log.(values(cut_dict_new)))
 
-    τ_border_lengths = sum(log.(values(borders_dict_old))) - sum(log.(values(borders_dict_new)))
+    old_edges = all_parts_edgelists(g, old_parts)
+    new_edges = all_parts_edgelists(g, new_parts)
 
-    #calculate τ relating to spanning trees
-    # for part in copy(old_parts)
-    #     for part_ in copy(new_parts)
-    #         if Set(part) == Set(part_)
-    #             setdiff!(old_parts, [part])
-    #             setdiff!(new_parts, [part_])
-    #         end
-    #     end
-    # end
+    old_q_edges = quotient_edgelist(old_edges, p_dict_old)
+    new_q_edges = quotient_edgelist(new_edges, p_dict_new)
 
-    old_edges = [nodes_to_edgelist(g, part) for part in old_parts]
-    new_edges = [nodes_to_edgelist(g, part) for part in new_parts]
+    old_q_τs = log_τ_sparse.(old_q_edges)
+    new_q_τs = log_τ_sparse.(new_q_edges)
 
-    old_τs = []
-    for edgelist in old_edges
-        push!(old_τs, log_τ(edgelist))
-    end
+    # old_edges = [nodes_to_edgelist(g, part) for part in old_parts]
+    # new_edges = [nodes_to_edgelist(g, part) for part in new_parts]
 
-    new_τs = []
-    for edgelist in new_edges
-        push!(new_τs, log_τ(edgelist))
-    end
-
-    # old_τs = [log_τ(edgelist) for edgelist in old_edges]
-    # new_τs = [log_τ(edgelist) for edgelist in new_edges]
+    old_τs = log_τ_sparse.(old_edges)
+    new_τs = log_τ_sparse.(new_edges)
 
     τ_spanning_trees = sum(old_τs) - sum(new_τs)
+    τ_quotient = sum(old_q_τs) - sum(new_q_τs)
     
-    τ = τ_border_lengths + τ_spanning_trees
-
-    for m in marked_edges_old
-        add_edge!(tree_old, m)
-    end
-
-    for m in marked_edges_new
-        add_edge!(tree_new, m)
-    end
+    τ = τ_quotient + τ_spanning_trees
 
     return τ
 end
 
 
-function energy_function(g, tree, marked_edges, beta)
+function quotient_edgelist(edgelist, ptition)
 
+    returns = []
+    for part in edgelist
+        for edge in part
+            u, v = src(edge), dst(edge)
+            if ptition[u] != ptition[v]
+                push!(returns, simple_edge(ptition[u], ptition[v]))
+            end
+        end
+    end
+    return returns
+end
+
+
+# function energy_function(g, tree, marked_edges, beta)
+
+#     ptition = partition(tree, marked_edges)
+#     cuts = length(cut_edges(ptition, g))
+
+#     J = (25 - cuts) ^ 2 
+    
+#     return exp(-beta * J)
+# end
+
+
+function energy_function_cuts(a::Number, bet, m2)
+    J = (m2 - a) ^ 2
+    return exp(-bet * J)
+end
+
+function energy_function_percents(a::Number, alph, m1)
+    J = (m1 - a) ^ 2
+    return exp(-alph * J)
+end
+
+function energy_function(v::Vector)
+    d = [56, 56] - v
+    a = norm(d)
+    return exp(-10 * a)
+end
+
+function binomial_prob(a, n, p)
+
+    binomial_coefficient = binomial(n, a)
+
+    binomial_prob = binomial_coefficient * p^a * (1 - p)^(n - a)
+
+    return binomial_prob
+end
+
+
+
+function energy_function_cuts(g, tree, marked_edges, bet, m2)
     ptition = partition(tree, marked_edges)
     cuts = length(cut_edges(ptition, g))
 
-    J = (12 - cuts) ^ 2 
-    
-    return exp(-beta * J)
-end
-
-function energy_function(a::Number)
-    J = (12 - a) ^ 2
-
-    return exp(- beta * J)
+    return energy_function_cuts(cuts, bet, m2)
 end
 
 function wilsons(g)
@@ -400,4 +627,350 @@ function wilsons(g)
 
     return tree
 
+end
+
+
+function political_energy_function(df, tree, marked_edges, alph, m1)
+    ptition = partition(tree, marked_edges)
+    votes = tally(df, "PRES16D", ptition)
+    total_votes = tally(df, "PRES16R", ptition) + votes
+    percents = votes ./ total_votes * 100
+    return energy_function_percents(percents[2], alph, m1)
+end
+
+function top_percent_from_partitions(ptition, df)
+    votes = tally(df, "PRES16D", ptition)
+    total_votes = tally(df, "PRES16R", ptition) + votes
+    percents = votes ./ total_votes * 100
+    return percents[2]
+end
+
+
+function polsby_popper(area, perimeter)
+    return 4 * pi * area / (perimeter ^ 2)
+end
+
+
+function polsby_popper(areas, boundary_lengths, perim_dict, tree, marked_edges, g)
+    rem_edge!(tree, marked_edges[1])
+    con_parts = connected_components(tree)
+    ptition = partition(con_parts)
+    cuts = cut_edges(ptition, g)
+    add_edge!(tree, marked_edges[1])
+
+    areas = [sum(areas[con_part]) for con_part in con_parts]
+    boundaries = [sum(boundary_lengths[con_part]) for con_part in con_parts]
+    border_length = sum([perim_dict[cut] for cut in cuts])
+
+    pp1 = polsby_popper(areas[1], boundaries[1] + border_length)
+    pp2 = polsby_popper(areas[2], boundaries[2] + border_length)
+
+    return (pp1 + pp2)/2
+end
+
+function polsby_popper(areas, boundary_lengths, perim_dict, ptition, g)
+    cuts = cut_edges(ptition, g)
+    border_length = sum([perim_dict[cut] for cut in cuts])
+
+    ones, twos = [], []
+    for (key, val) in ptition
+        if val == 1
+            push!(ones, key)
+        else
+            push!(twos, key)
+        end
+    end
+
+    con_parts = [ones, twos]
+    boundaries = [sum(boundary_lengths[con_part]) for con_part in con_parts]
+    areas = [sum(areas[con_part]) for con_part in con_parts]
+
+    pp1 = polsby_popper(areas[1], boundaries[1] + border_length)
+    pp2 = polsby_popper(areas[2], boundaries[2] + border_length)
+
+    return (pp1 + pp2) / 2
+end
+
+function polsby_popper_energy_function(p)
+    
+    J = (1/3 - p) ^ 2
+    
+    return exp(- 1000 * J)
+    
+end
+
+function multivariate_energy_function(df, g, tree, marked_edges, alph, bet, m1, m2)
+    return energy_function_cuts(g, tree, marked_edges, bet, m2)
+    # return political_energy_function(df, tree, marked_edges, alph, m1) * energy_function_cuts(g, tree, marked_edges, bet, m2)
+end
+
+
+function multivariate_energy_function(cuts, percents, alph, bet, m1, m2)
+    return energy_function_cuts(length(cuts), bet, m2) * energy_function_percents(percents, alph, m1)
+
+end
+
+
+
+function find_one_sided_cut(tree, df, target_pop, epsilon)
+    for edge in edges(tree)
+        part_dict = partition(tree, [edge])
+        totals = tally(df, "TOTPOP", part_dict)
+        if single_within_percent_of_ideal(totals, target_pop, epsilon)
+            return edge
+        end
+    end
+    return 
+end
+
+
+function separate_district(tree, cut_edge, target_pop, df)
+    tree_copy = deepcopy(tree)
+    rem_edge!(tree_copy, cut_edge)
+    components = connected_components(tree_copy)
+    component_pops = [sum(df[component, "TOTPOP"]) for component in components]
+    target_diffs = abs.(component_pops .- target_pop)
+    idx = argmin(target_diffs)
+
+    district_vertices = components[idx]
+    remaining_vertices = setdiff(vertices(tree), district_vertices)
+    return district_vertices, remaining_vertices
+end
+
+function find_k_partition(g, df, k, pop_col, epsilon)
+    remaining_graph = deepcopy(g)
+    remaining_pop = sum(df[!, pop_col])
+    remaining_df = deepcopy(df)
+    districts = []
+
+    current_to_original = collect(1:nv(g))
+
+
+    for i in ProgressBar(1:(k - 1))
+        target_pop = remaining_pop / (k - i + 1)
+
+        b = []
+        c = []
+        counter = 1
+        while true
+            tree = wilsons(remaining_graph)
+            cut_edge = find_one_sided_cut(tree, remaining_df, target_pop, epsilon)
+
+            if !isnothing(cut_edge)
+                push!(b, cut_edge)
+                push!(c, tree)
+                break
+            end
+            counter += 1
+            if counter > 10
+                println("couldn't get it done")
+                return
+            end
+        end
+        cut_edge = b[1]
+        tree = c[1]
+        district, remaining_nodes = separate_district(tree, cut_edge, target_pop, remaining_df)
+
+        og_district = [current_to_original[node] for node in district]
+        push!(districts, og_district)
+        remaining_pop -= sum(df[og_district, pop_col])
+
+        remaining_graph, node_map = induced_subgraph(remaining_graph, remaining_nodes)
+
+        current_to_original = [current_to_original[node_map[i]] for i in 1:length(node_map)]
+        remaining_df = remaining_df[node_map, :]
+
+        if i == k - 1
+            og_district = [current_to_original[node] for node in vertices(remaining_graph)]
+            push!(districts, og_district)
+        end
+    end
+    
+
+    return districts
+end
+
+
+
+function partition_to_tree_marked_edges(g, districts)
+    k = length(districts)
+    
+    parts = partition(districts)
+    tree = SimpleGraph(nv(g))
+
+    for district in districts 
+        district_subgraph, _ = induced_subgraph(g, district)
+        district_tree = wilsons(district_subgraph)
+
+        for edge in edges(district_tree)
+            og_src = district[src(edge)]
+            og_dst = district[dst(edge)]
+            add_edge!(tree, simple_edge(og_src, og_dst))
+        end
+    end
+
+    cut_edges = []
+    for edge in edges(g)
+        dist1 = parts[src(edge)]
+        dist2 = parts[dst(edge)]
+
+        if  dist1 != dist2
+            push!(cut_edges, simple_edge(edge))
+        end
+    end
+
+    connected_districts = Set([1])
+    marked_edges = Graphs.SimpleGraphs.SimpleEdge{Int64}[]
+
+    while (length(connected_districts)) < k
+        for edge in cut_edges
+            dist1 = parts[src(edge)]
+            dist2 = parts[dst(edge)]
+
+            if (dist1 in connected_districts) ⊻ (dist2 in connected_districts)
+                push!(marked_edges, edge)
+                push!(connected_districts, dist1)
+                push!(connected_districts, dist2)
+
+                add_edge!(tree, simple_edge(edge))
+
+                filter!(e -> e != edge, cut_edges)
+                break
+            end
+        end
+    end
+    return tree, marked_edges
+end
+
+function energy_function_MVAP(df, tree, marked_edges, alph, m1)
+    ptition = partition(tree, marked_edges)
+    pop = tally(df, "TOTPOP", ptition)
+    hvap = tally(df, "HVAP", ptition)
+
+    prop = hvap ./ pop
+    good = [0.3 < p < 0.6 ? 1 : 0 for p in prop]
+    num = sum(good)
+
+    return  num
+end
+
+function MVAP_analyser(ptition, df)
+    pop = tally(df, "TOTPOP", ptition)
+    hvap = tally(df, "HVAP", ptition)
+    
+    prop = hvap ./ pop
+    good = [0.3 < p < 0.6 ? 1 : 0 for p in prop]
+    num = sum(good)
+    return num
+end
+
+function tx_energy_function_cuts(g, tree, marked_edges, bet, m2)
+    ptition = partition(tree, marked_edges)
+    cuts = length(cut_edges(ptition, g))
+
+    return -0.01*(cuts - 3346)^2
+
+end
+
+
+function energy_function_mm(g, df, tree, marked_edges, alph, m1)
+    ptition = partition(tree, marked_edges)
+    mm = mean_median_score(ptition, df)
+    return - 1000 * (mm - 0)^2
+end
+
+function seats(ptition, df)
+    tot = tally(df, "PRE20D", ptition) + tally(df, "PRE20R", ptition) + tally(df, "PRE20O", ptition)
+    dem = tally(df, "PRE20D", ptition)
+
+    perc = dem ./ tot
+    won = [p > 0.5 ? 1 : 0 for p in perc]
+    return sum(won)
+end
+
+function mean_median_score(ptition, df)
+    tot = tally(df, "PRE20D", ptition) + tally(df, "PRE20R", ptition) + tally(df, "PRE20O", ptition)
+    dem = tally(df, "PRE20D", ptition)
+
+    perc = dem ./ tot
+
+    return median(perc) - mean(perc)
+end
+
+function TX_energy_function(df, g, tree, marked_edges, alph, bet, m1, m2)   
+    E1 = tx_energy_function_cuts(g, tree, marked_edges, bet, m2)
+    E2 = energy_function_mm(g, df, tree, marked_edges, alph, m1)
+
+    return E1
+end
+
+function Rosen(df, g, tree, marked_edges, T)
+    ptition = partition(tree, marked_edges)
+    mins = MVAP_analyser(ptition, df)
+    won = seats(ptition, df)
+    return -Rosen(mins, won)/T
+end
+
+function Rosen(cuts, dem_seats)
+    x1 = (dem_seats - 18)/3
+    x2 = (cuts - 10)/3
+
+    E = (1 - x1)^2 + 100 * (x2 - x1^2)^2
+    return E
+end
+
+
+function Rosen_analysis(part, df, g)
+    mins = MVAP_analyser(part, df)
+    won = seats(part, df)
+    return Rosen(mins, won)
+end
+
+
+
+function mono_energy(df, tree, marked_edges)
+    part = partition(tree, marked_edges)
+    wins = seats(part, df)
+    target = 13
+    return abs(wins - target)
+end
+
+
+
+
+
+function geometric_features(ptition, df)
+    districts = unique(values(ptition))
+    
+    x_centers, y_centers = [], []
+    for d in districts
+        indices = [k for (k, v) in ptition if v == d]
+        push!(x_centers, mean(df.x[indices]))
+        push!(y_centers, mean(df.y[indices]))
+    end
+
+    return mean(x_centers), mean(y_centers)
+end
+
+
+function exponential_energy_function(df, g, tree, marked_edges, bet, m, λ, d)
+    ptition = partition(tree, marked_edges)
+    weights_sums = tally(df, "weights", ptition)
+    x = weights_sums[d]
+    n = count(isequal(d), values(ptition))
+    Z = (x - n/2)/sqrt(n/12)
+    U = (1 + erf(Z/sqrt(2)))/2
+    X = -log(1 - U)/λ
+    return -bet * (X - m)^2, X
+end
+
+
+function uniform_variable(df, g, tree, marked_edges, bet, m, λ, d)
+    ptition = partition(tree, marked_edges)
+    weights_sums = tally(df, "weights", ptition)
+    x = weights_sums[d]
+    n = count(isequal(d), values(ptition))
+    Z = (x - n/2)/sqrt(n/12)
+    U = (1 + erf(Z/sqrt(2)))/2
+    return U
 end
