@@ -64,8 +64,8 @@ function main(alph, bet, m1, m2, initialization=nothing)
     partitions = []
     for i in 1:num_iterations
 
-        tree_old = copy(tree)
-        marked_edges_old = copy(marked_edges)
+        tree_old = deepcopy(tree)
+        marked_edges_old = deepcopy(marked_edges)
         
         cycle_edges, edge_plus, tree_new, old_edge, new_edge, marked_edges_new, tries = proposal(g, df, tree, marked_edges, epsilon, 2)
         reject += tries
@@ -88,12 +88,12 @@ function main(alph, bet, m1, m2, initialization=nothing)
                 cycle_inters += 1
             end
         else
-            tree_new = copy(tree_old)
-            marked_edges_new = copy(marked_edges_old)
+            tree_new = deepcopy(tree_old)
+            marked_edges_new = deepcopy(marked_edges_old)
         end
         push!(partitions, partition(tree_new, marked_edges_new))
-        tree = copy(tree_new)
-        marked_edges = copy(marked_edges_new)
+        tree = deepcopy(tree_new)
+        marked_edges = deepcopy(marked_edges_new)
     end
 
     return partitions, tree, marked_edges
