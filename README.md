@@ -15,6 +15,8 @@ MEW (Marked Edge Walk) is an MCMC algorithm designed for sampling graph partitio
 - **`main_NH.jl`** - Executable functions for running MEW on New Hampshire data
 - **`main_TX.jl`** - Executable functions for running MEW on Texas data
 - **`beano2.3.jl`** - Helper functions used by all Julia files above
+- **`push_reader2.jl`** - Code to read observables from partitions
+- **`ks1.jl`** - Code to calculate KS statistics from observables
 
 ### Configuration Files
 
