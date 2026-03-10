@@ -73,3 +73,14 @@ To run multiple chains on Texas:
 ```julia
 include("batched_wrapper_TX.jl")
 ```
+
+### Recreating Paper Figures
+
+Specific code snippets for recreating figures are not explicitly provided. However, after running chains, observables can be calculated with:
+```julia
+include("push_reader2.jl")
+```
+and KS statistics can be calculated with: 
+```julia
+include("ks1.jl")
+```
