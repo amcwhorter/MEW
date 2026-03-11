@@ -30,7 +30,7 @@ function main(alph, bet, m1, m2, initialization=nothing)
     table = Shapefile.Table("NH/NH.shp")
     df = DataFrame(table)
 
-    epsilon = 0.1
+    epsilon = 0.05
     if isnothing(initialization) 
         marked_edges = Vector{Graphs.SimpleGraphs.SimpleEdge{Int64}}()
         trees = []
