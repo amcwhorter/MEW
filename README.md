@@ -17,6 +17,7 @@ MEW (Marked Edge Walk) is an MCMC algorithm designed for sampling graph partitio
 - **`beano2.3.jl`** - Helper functions used by all Julia files above
 - **`push_reader2.jl`** - Code to read observables from partitions
 - **`ks1.jl`** - Code to calculate KS statistics from observables
+- **`make_all_figures.jl`** - Regenerates Figures 3-8 from the data in `data/`
 
 ### Configuration Files
 
@@ -27,6 +28,8 @@ MEW (Marked Edge Walk) is an MCMC algorithm designed for sampling graph partitio
 
 - **`NH/`** - Shape files and dual graph data for New Hampshire
 - **`Texas/`** - Shape files and dual graph data for Texas
+- **`data/`** - Compact processed data backing each figure (see `make_all_figures.jl`)
+- **`figures/`** - Output of `make_all_figures.jl`
 
 ## Getting Started
 
@@ -78,7 +81,13 @@ include("batched_wrapper_TX.jl")
 
 ### Recreating Paper Figures
 
-Specific code snippets for recreating figures are not explicitly provided. However, after running chains, observables can be calculated with:
+Figures 3-8 can be regenerated directly from the data in `data/`:
+```bash
+julia make_all_figures.jl
+```
+This writes each figure as a PNG to `figures/`.
+
+For figures not covered by `make_all_figures.jl`, after running chains, observables can be calculated with:
 ```julia
 include("push_reader2.jl")
 ```
